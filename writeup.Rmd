@@ -1,0 +1,294 @@
+---
+title: "Recognising the quality of barbell lifts using data collected from motion sensors"
+author: 
+date: 
+output: html_document
+---
+
+## Introduction
+
+For this project we were provided data collected from motion sensors attached to belts, gloves, armbands and dumbells used by six male subjects while performing Unilateral Dumbell Biceps Curls. Three-axis acceleration, gyroscope and magnetometer data was collected at a rate of 45 Hz during the execution of the lift. The subjects deliberately performed the exercises in five different ways to include the desired execution and four commonly made mistakes:
+
+* __A__: _Exactly according to specifications_ (the desired execution)
+* __B__: _Throwing the elbows to the front_
+* __C__: _Lifting the dumbell only halfway_
+* __D__: _Lowering the dumbell only halfway_
+* __E__: _Throwing the hips forward_
+
+The six subjects were supervised by an experienced weightlifter to ensure that lifts were accurately classified.
+
+For more information, consult [_Qualitative Activity Recognition of Weight Lifting Exercises_; Velloso et al. 2013](http://groupware.les.inf.puc-rio.br/work.jsf?p1=11201)
+
+The goal for this project is to select and apply a machine learning algorithm to the data so as to develop a model that will accurately predict the categorisation of a lift based on the sensory motion data collected during execution.
+
+## Developing the model
+
+### Getting and cleaning the data
+
+The data used to train our model can be obtained [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv). To reproduce these results, it is assumed that the data has been downloaded and extracted to the working directory or R.
+
+```{r, echo=FALSE}
+setwd("/Users/rambler/Documents/Coursera/Data Science/08_MachineLearning/Writeup")
+```
+
+The downloaded data is stored in a data frame called `data`.
+
+```{r Read, cache=TRUE}
+data <- read.csv("pml-training.csv")
+```
+
+Some of the rows contain summary information of data for each window; I neglect all columns that contain these summaries and have NA values except for these rows. I also neglect several variables that I cannot see to be useful in the analysis, like `X`, a redundant row label, timestamps and window labels. The categorisation (outcome) is stored in the variable `classe`.
+
+```{r Cleanup}
+  # drop cols that contain factor variables (they are not
+  # meaningful factors) except, of course, "classe"; also,
+  # if the first row contains an NA, it is an indication of
+  # a variable that is only used in the summary rows
+  keep <- sapply(
+    colnames(data),
+    function(x) 
+      class(data[[x]]) != "factor" & !is.na(data[[x]][1])
+  )
+
+  data <- data[ , c(colnames(data)[keep], "classe")]
+  
+  # drop columns not needed or which I don't 
+  # expect to be good predictors
+
+  to.drop <- c(
+    "X",                    # duplicate row number
+    "raw_timestamp_part_1", # arbitrary time stamp
+    "raw_timestamp_part_2",
+    "num_window"            # window of data
+  )
+  cols.drop <- -which(colnames(data) %in% to.drop)
+  data <- data[ , cols.drop]
+```
+
+### Required library
+
+The following analysis relied heavily on algorithms provided in the R [caret package](http://caret.r-forge.r-project.org/).
+
+```{r}
+library(caret)
+```
+
+
+### Preparing the data
+
+
+
+#### _Splitting the data into a training and a testing set._ 
+
+
+
+I chose a 75%-25% training-testing split. The splitting was performed by an algorithm that randomly splits the data according to outcome strata to ensure that the various outcomes are similarly represented in the training and data sets.
+
+```{r Model building}
+
+set.seed(32343)
+
+# Partition data ###############################################################
+inTrain <- createDataPartition(
+  y = data$classe,
+  p = 0.75,
+  list = FALSE
+)
+
+training <- data[inTrain, ]
+testing <- data[-inTrain, ]
+
+```
+
+I performed some rudimentary explorations to see how the data was distributed and to see if any of the variables had near zero variance. I didn't find anything that I felt particularly required addressing, and the following commented out code is simply provided for reference.
+
+```{r}
+# EXPLORING ####################################################################
+# Distributions...
+#par(mfrow = c(5, 5))
+#for (v in colnames(training)) 
+#  if (class(training[[v]]) != "factor") 
+#    hist(training[[v]], main = v)
+
+# Data types...
+#for (c in colnames(training)) 
+#  if (class(training[[c]]) != "numeric") 
+#    message(sprintf("%s: %s", c, class(training[[c]])))
+
+# Near zero variation...
+#nsv <- nearZeroVar(
+#  training, 
+#  saveMetrics = TRUE
+#)
+
+# nsv
+
+```
+
+
+#### _Reducing the level of redundant information in the predictor variables._
+
+Exploring the training data set, we can see that there is a high level of correlation between some of the predictors. The following plots show examples of predictor pairs that have particularly high levels of correlation. I've plotted the points with a low alpha level so that we can more easily see regions of greater density.
+
+```{r Correlations, fig.width=9, fig.height=16}
+# Identifying variables with high correlation
+par(mfrow = c(5, 3))
+cnames <- colnames(training)
+for (i in 1:(length(cnames) - 2)) {
+  iname <- cnames[i]
+  for (j in (i + 1):(length(cnames) - 1)) {
+    jname <- cnames[j]
+    r <- cor(training[[iname]], training[[jname]])
+    if (r^2 > 0.65) {
+      plot(
+        training[[iname]] ~ training[[jname]],
+        xlab = jname,
+        ylab = iname,
+        main = sprintf("r = %f", r),
+        cex = 0.6, 
+        col = rgb(0,0,0,0.05),
+        pch = 16
+      )
+    }
+  }
+}
+
+```
+
+We can notice that - although these variables do not necessarily appear linearly related - a large amount of informational redundancy would exist in a model that used all of these predictors. 
+
+In order to reduce the informational redundancy in the predictors (and the dimensions of the data set), I decided to break the predictors into principal components. Principal components that maintained 80% of the variance in the original predictors resulted in a great dimensional reduction (52 predictors reduced to 13) and didn't perform much worse than principal components created with greater thesholds. 
+
+A common criticism of reducing the cofactors to principal components is that it makes the model more difficult to interpret; in this case, however, the raw data is already in a form that is not readily or practically human-interpretable, so I believe this to be a non issue. 
+
+```{r Principal Components}
+# PCA ##########################################################################
+
+preProc <- preProcess(
+  training[, 1:(ncol(training) - 1)],
+  method = "pca",
+  thresh = 0.8
+)
+
+print(preProc)
+
+training.pc <- predict(
+  preProc, 
+  training[, 1:(ncol(training) - 1)]
+)
+
+training.pc$classe <- training$classe
+```
+
+Although 13 dimensions are much fewer than the original 52, they are still difficult to picture. Nevertheless, I wanted to see whether noticeable separation of the groups existed when the outcomes were plotted against the components with the greatest variance. The following plots show my attempts to see this. Again, I used very low alpha levels in the plots so that we can more easily identify regions of greater density.
+
+```{r, fig.width=9, fig.height=9}
+chosen.cols <- c(
+  "darkorange", 
+  "darkslategray", 
+  "firebrick", 
+  "darkviolet", 
+  "darkgreen"
+)
+decreased.alpha <- sapply(
+  chosen.cols,
+  function(c) {
+    col <- col2rgb(c) / 255
+    rgb(
+      col["red", ],
+      col["blue", ], 
+      col["green", ], 
+      alpha = 0.1
+    )
+  }
+)
+cols <- sapply(
+  training$classe,
+  function(x) decreased.alpha[x]
+)
+
+par(mfrow = c(1, 1))
+plot(
+  PC2 ~ PC1, 
+  col = cols, 
+  data = training.pc, 
+  cex = 0.5,
+  pch = 16,
+  main = "Outcome against the first two principal components"
+)
+
+```
+
+```{r Cloudplot, fig.width=9, fig.height=9}
+
+# Cloud plot of the first three PCs
+
+cloud(
+  PC3 ~ PC1 * PC2, 
+  data = training.pc, 
+  col = cols, 
+  cex = 0.5,
+  pch = 16,
+  scale = list(arrows = FALSE),
+  main = "Outcome against the first three principle components"
+)
+
+```
+
+As there is no clear, useful clustering based on the first three (at least) principal components, I neglected to provide a legend; suffice it to see that each cluster contains many different outcomes and densities.
+
+In any case, the information needed for the transformation is provided here:
+
+```{r}
+preProc$rotation
+```
+
+#### _Applying transformations from the training set to the testing set._
+
+Here I transform the raw testing data to components using the transformation that was obtained from the training data so that it is ready for predicting.
+
+```{r}
+# Make sure that the same transformation is applied to the testing set
+testing.pc <- predict(
+  preProc, # transformation based on training set
+  testing[, 1:(ncol(testing) - 1)]
+)
+
+testing.pc$classe <- testing$classe
+```
+
+
+### _Generating a list of predictions based on the training set._
+
+For this project, I used an algorithm that made predictions based on the _nearest neighbours_ in the training set of each principal component vector in the testing set. That is, we can imaging the training data as a set of vectors, each of which determining the position of an outcome in 13-dimensional space. To make a prediction, the algorithm takes in a vector and examines the space near the point the vector determines: the outcome of greatest density in that region is the prediction.
+
+```{r Train}
+# TRAIN MODEL ##################################################################
+
+# This may take a couple of minutes...
+modelFit <- train(
+  classe ~ .,
+  data = training.pc,
+  method = "knn"
+)
+
+predictions <- predict(
+  modelFit,
+  newdata = testing.pc
+)
+
+```
+
+## Evaluation
+Below is a confusion matrix that evaluates the accuracy of the model based on correct predictions made on the testing data set.
+
+```{r Evaluate}
+
+confusionMatrix(
+  predictions,
+  testing.pc$classe
+)
+
+```
+
+As we can see, cross validation of the model's predictions against the data subset reserved for testing shows approximately 95% accuracy (and an out-of-sample error rate of about 5%). I'd expect misclassifications around 5% of the time when applying the model to new data.
